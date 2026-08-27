@@ -1,9 +1,10 @@
 """
-사진 자동 분류 프로그램 (대화형, exe 빌드 대상)
+사진 자동 분류 프로그램 (대화형, exe 빌드 대상) v2
 
-- 동일한 사진끼리는 서로 다른 폴더에 들어가도록 자동 배정
-- 결과 폴더명은 자연수(1, 2, 3 ... N)로 생성되어 탐색기에서 확인이 쉬움
-- 원본은 손대지 않고 항상 '복사'만 함 (안전 우선)
+변경점:
+- 하위 폴더까지 재귀적으로 탐색 (rglob)
+- HEIC/HEIF/TIFF/JFIF/AVIF 확장자 추가 인식
+- 인식 안 된 파일 개수/확장자를 화면에 표시 (진단용)
 """
 
 import hashlib
@@ -13,7 +14,10 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
+IMAGE_EXTENSIONS = {
+    ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp",
+    ".heic", ".heif", ".tif", ".tiff", ".jfif", ".avif",
+}
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger(__name__)
@@ -26,11 +30,18 @@ def ask(prompt: str, default: str = "") -> str:
 
 
 def scan_images(source_dir: Path) -> list[Path]:
-    files = [p for p in source_dir.iterdir()
-             if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS]
-    if not files:
-        raise ValueError(f"'{source_dir}' 에서 이미지 파일을 찾지 못했습니다.")
-    return files
+    all_files = [p for p in source_dir.rglob("*") if p.is_file()]
+    images = [p for p in all_files if p.suffix.lower() in IMAGE_EXTENSIONS]
+    skipped = [p for p in all_files if p.suffix.lower() not in IMAGE_EXTENSIONS]
+
+    logger.info(f"하위 폴더 포함 전체 파일 {len(all_files)}개 중 이미지 {len(images)}개 인식")
+    if skipped:
+        skip_exts = sorted(set(p.suffix.lower() or "(확장자 없음)" for p in skipped))
+        logger.info(f"인식되지 않아 제외된 파일 {len(skipped)}개 (확장자: {', '.join(skip_exts)})")
+
+    if not images:
+        raise ValueError(f"'{source_dir}' 및 하위 폴더에서 이미지 파일을 찾지 못했습니다.")
+    return images
 
 
 def group_exact(files: list[Path]) -> list[list[Path]]:
@@ -116,9 +127,9 @@ def execute_plan(plan, dest_root: Path, num_folders: int):
 
 
 def main():
-    print("=== 사진 자동 분류 프로그램 ===")
+    print("=== 사진 자동 분류 프로그램 (v2) ===")
     print("동일한 사진끼리는 서로 다른 폴더에 들어가도록 자동으로 나눠줍니다.")
-    print("(원본은 그대로 두고, 결과 폴더에 복사만 합니다)\n")
+    print("(하위 폴더까지 포함해서 스캔하며, 원본은 그대로 두고 복사만 합니다)\n")
 
     source = ask("원본 사진이 있는 폴더 경로를 입력하세요 (예: C:\\Photos)")
     if not source:
@@ -145,7 +156,7 @@ def main():
     print("\n작업을 시작합니다...\n")
 
     files = scan_images(source_dir)
-    logger.info(f"총 {len(files)}장의 이미지를 찾았습니다.")
+    logger.info(f"총 {len(files)}장의 이미지를 최종적으로 사용합니다.")
 
     if method_str == "2":
         groups = group_perceptual(files)

@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   push:
     paths:
-      - 'organize_photos.py'
+      - 'organize_photos_gui.py'
       - '.github/workflows/build-exe.yml'
 
 jobs:
@@ -24,10 +24,10 @@ jobs:
           pip install pyinstaller pillow imagehash
 
       - name: Build EXE
-        run: pyinstaller --onefile --console --name organize_photos organize_photos.py
+        run: pyinstaller --onefile --windowed --name organize_photos_gui organize_photos_gui.py
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: organize_photos-exe
-          path: dist/organize_photos.exe
+          name: organize_photos_gui-exe
+          path: dist/organize_photos_gui.exe

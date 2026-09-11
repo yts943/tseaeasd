@@ -3,13 +3,18 @@ name: Build Windows EXE
 on:
   workflow_dispatch:
   push:
+    branches: [ main ]
     paths:
       - 'organize_photos_gui.py'
       - '.github/workflows/build-exe.yml'
+    tags:
+      - 'v*'
 
 jobs:
   build:
     runs-on: windows-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
@@ -31,3 +36,18 @@ jobs:
         with:
           name: organize_photos_gui-exe
           path: dist/organize_photos_gui.exe
+
+      - name: Create Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/organize_photos_gui.exe
+          body: |
+            ## 사진 자동 분류 프로그램
+
+            1. organize_photos_gui.exe 다운로드
+            2. 더블클릭 실행 (Windows 경고가 뜨면 "추가 정보" → "실행")
+            3. 원본 사진 폴더, 결과 저장 폴더 지정 후 "미리보기"로 먼저 확인
+            4. 이상 없으면 "실행 (실제 복사)" 클릭
+
+            원본 파일은 절대 건드리지 않고 항상 복사만 합니다.

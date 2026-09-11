@@ -1,15 +1,20 @@
 """
-사진 자동 분류 프로그램 - GUI 버전
-미리보기: 실제 복사 전에 그룹핑 결과와 폴더별 배치 예상치를 확인
-실행: 미리보기와 동일한 로직으로 실제 복사 수행
+사진 자동 분류 프로그램 - GUI 버전 (ttkbootstrap 디자인)
+동일한 사진끼리는 서로 다른 폴더에 들어가도록 자동 배정.
+백그라운드 스레드로 처리하여 스캔 중에도 화면이 멈추지 않음.
 """
 
 import hashlib
+import os
+import queue
 import shutil
-import tkinter as tk
-from tkinter import filedialog, messagebox, scrolledtext, ttk
+import threading
 from collections import defaultdict
 from pathlib import Path
+
+import ttkbootstrap as tb
+from ttkbootstrap.constants import *
+from tkinter import filedialog, messagebox, scrolledtext
 
 IMAGE_EXTENSIONS = {
     ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp",
@@ -115,57 +120,170 @@ def execute_plan(plan, dest_root: Path, num_folders: int, log_fn):
 
 # ---------- GUI ----------
 
+class StatCard(tb.Frame):
+    """숫자 + 캡션으로 구성된 작은 통계 카드"""
+
+    def __init__(self, master, caption, bootstyle="secondary"):
+        super().__init__(master, bootstyle=bootstyle, padding=14)
+        self.value_var = tb.StringVar(value="-")
+        tb.Label(
+            self, textvariable=self.value_var, font=("Segoe UI", 22, "bold"),
+            bootstyle=f"inverse-{bootstyle}",
+        ).pack(anchor="w")
+        tb.Label(
+            self, text=caption, font=("Segoe UI", 10), bootstyle=f"inverse-{bootstyle}",
+        ).pack(anchor="w")
+
+    def set(self, value):
+        self.value_var.set(str(value))
+
+
 class App:
-    def __init__(self, root):
+    def __init__(self, root: tb.Window):
         self.root = root
         root.title("사진 자동 분류 프로그램")
-        root.geometry("760x580")
+        root.geometry("920x720")
+        root.minsize(820, 640)
 
-        pad = {"padx": 8, "pady": 6}
-
-        frm = ttk.Frame(root)
-        frm.pack(fill="x", **pad)
-
-        ttk.Label(frm, text="원본 사진 폴더").grid(row=0, column=0, sticky="w")
-        self.source_var = tk.StringVar()
-        ttk.Entry(frm, textvariable=self.source_var, width=60).grid(row=0, column=1, padx=4)
-        ttk.Button(frm, text="찾아보기", command=self.browse_source).grid(row=0, column=2)
-
-        ttk.Label(frm, text="결과 저장 폴더").grid(row=1, column=0, sticky="w")
-        self.dest_var = tk.StringVar()
-        ttk.Entry(frm, textvariable=self.dest_var, width=60).grid(row=1, column=1, padx=4)
-        ttk.Button(frm, text="찾아보기", command=self.browse_dest).grid(row=1, column=2)
-
-        ttk.Label(frm, text="폴더 개수").grid(row=2, column=0, sticky="w")
-        self.num_folders_var = tk.StringVar(value="100")
-        ttk.Entry(frm, textvariable=self.num_folders_var, width=10).grid(row=2, column=1, sticky="w")
-
-        ttk.Label(frm, text="판별 방식").grid(row=3, column=0, sticky="w")
-        self.method_var = tk.StringVar(value="exact")
-        ttk.Radiobutton(frm, text="완전히 동일한 파일만 (안전)", variable=self.method_var,
-                         value="exact").grid(row=3, column=1, sticky="w")
-        ttk.Radiobutton(frm, text="리사이즈/재압축된 사진도 포함", variable=self.method_var,
-                         value="perceptual").grid(row=4, column=1, sticky="w")
-
-        btn_frm = ttk.Frame(root)
-        btn_frm.pack(fill="x", **pad)
-        ttk.Button(btn_frm, text="미리보기", command=self.on_preview).pack(side="left", padx=4)
-        ttk.Button(btn_frm, text="실행 (실제 복사)", command=self.on_run).pack(side="left", padx=4)
-
-        self.log_widget = scrolledtext.ScrolledText(root, height=26, state="disabled")
-        self.log_widget.pack(fill="both", expand=True, **pad)
-
+        self.queue = queue.Queue()
         self._plan = None
         self._groups_sorted = None
         self._num_folders = None
         self._dest_root = None
 
+        self._build_header()
+        self._build_input_card()
+        self._build_action_row()
+        self._build_stats_row()
+        self._build_log_area()
+
+        self.root.after(80, self._poll_queue)
+
+    # ---- 레이아웃 ----
+
+    def _build_header(self):
+        header = tb.Frame(self.root, padding=(24, 20, 24, 10))
+        header.pack(fill="x")
+        tb.Label(
+            header, text="📸  사진 자동 분류 프로그램",
+            font=("Segoe UI", 20, "bold"),
+        ).pack(anchor="w")
+        tb.Label(
+            header,
+            text="동일한 사진끼리는 서로 다른 폴더에, 원본은 손대지 않고 복사만 합니다.",
+            font=("Segoe UI", 10), bootstyle="secondary",
+        ).pack(anchor="w", pady=(2, 0))
+
+    def _build_input_card(self):
+        card = tb.Labelframe(self.root, text="설정", padding=18, bootstyle="secondary")
+        card.pack(fill="x", padx=24, pady=(4, 12))
+        card.columnconfigure(1, weight=1)
+
+        tb.Label(card, text="원본 사진 폴더", font=("Segoe UI", 10, "bold")).grid(
+            row=0, column=0, sticky="w", pady=6)
+        self.source_var = tb.StringVar()
+        tb.Entry(card, textvariable=self.source_var).grid(
+            row=0, column=1, sticky="ew", padx=10)
+        tb.Button(card, text="찾아보기", bootstyle="secondary-outline",
+                   command=self.browse_source).grid(row=0, column=2)
+
+        tb.Label(card, text="결과 저장 폴더", font=("Segoe UI", 10, "bold")).grid(
+            row=1, column=0, sticky="w", pady=6)
+        self.dest_var = tb.StringVar()
+        tb.Entry(card, textvariable=self.dest_var).grid(
+            row=1, column=1, sticky="ew", padx=10)
+        tb.Button(card, text="찾아보기", bootstyle="secondary-outline",
+                   command=self.browse_dest).grid(row=1, column=2)
+
+        opt_row = tb.Frame(card)
+        opt_row.grid(row=2, column=0, columnspan=3, sticky="w", pady=(12, 0))
+
+        tb.Label(opt_row, text="폴더 개수", font=("Segoe UI", 10, "bold")).pack(
+            side="left", padx=(0, 8))
+        self.num_folders_var = tb.StringVar(value="100")
+        tb.Entry(opt_row, textvariable=self.num_folders_var, width=8).pack(side="left")
+
+        tb.Label(opt_row, text="   판별 방식", font=("Segoe UI", 10, "bold")).pack(
+            side="left", padx=(24, 8))
+        self.method_var = tb.StringVar(value="exact")
+        tb.Radiobutton(opt_row, text="완전 동일 파일만 (안전)", variable=self.method_var,
+                        value="exact", bootstyle="primary").pack(side="left", padx=4)
+        tb.Radiobutton(opt_row, text="리사이즈·재압축 사진도 포함", variable=self.method_var,
+                        value="perceptual", bootstyle="primary").pack(side="left", padx=4)
+
+    def _build_action_row(self):
+        row = tb.Frame(self.root, padding=(24, 0))
+        row.pack(fill="x")
+        tb.Button(row, text="🔍  미리보기", bootstyle="info-outline",
+                   width=16, command=self.on_preview).pack(side="left")
+        tb.Button(row, text="▶  실행 (실제 복사)", bootstyle="success",
+                   width=20, command=self.on_run).pack(side="left", padx=10)
+        self.open_folder_btn = tb.Button(
+            row, text="📂  결과 폴더 열기", bootstyle="secondary-outline",
+            width=16, command=self.open_result_folder, state="disabled")
+        self.open_folder_btn.pack(side="left")
+
+        self.progress = tb.Progressbar(row, mode="indeterminate", bootstyle="success-striped")
+        self.progress.pack(side="left", fill="x", expand=True, padx=16)
+
+    def _build_stats_row(self):
+        row = tb.Frame(self.root, padding=(24, 12, 24, 4))
+        row.pack(fill="x")
+        row.columnconfigure((0, 1, 2), weight=1)
+
+        self.stat_total = StatCard(row, "스캔된 사진", bootstyle="primary")
+        self.stat_total.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+
+        self.stat_groups = StatCard(row, "고유 그룹 수", bootstyle="info")
+        self.stat_groups.grid(row=0, column=1, sticky="ew", padx=6)
+
+        self.stat_avg = StatCard(row, "폴더당 평균", bootstyle="success")
+        self.stat_avg.grid(row=0, column=2, sticky="ew", padx=(6, 0))
+
+    def _build_log_area(self):
+        wrap = tb.Labelframe(self.root, text="진행 로그", padding=10, bootstyle="secondary")
+        wrap.pack(fill="both", expand=True, padx=24, pady=(4, 20))
+        self.log_widget = scrolledtext.ScrolledText(
+            wrap, height=16, state="disabled", font=("Consolas", 10),
+            bg="#1e1e1e", fg="#d4d4d4", insertbackground="#d4d4d4", borderwidth=0,
+        )
+        self.log_widget.pack(fill="both", expand=True)
+
+    # ---- 로그/큐 ----
+
     def log(self, msg: str):
-        self.log_widget.configure(state="normal")
-        self.log_widget.insert("end", msg + "\n")
-        self.log_widget.see("end")
-        self.log_widget.configure(state="disabled")
-        self.root.update_idletasks()
+        self.queue.put(("log", msg))
+
+    def set_stats(self, total, groups, avg):
+        self.queue.put(("stats", (total, groups, avg)))
+
+    def _poll_queue(self):
+        try:
+            while True:
+                kind, payload = self.queue.get_nowait()
+                if kind == "log":
+                    self.log_widget.configure(state="normal")
+                    self.log_widget.insert("end", payload + "\n")
+                    self.log_widget.see("end")
+                    self.log_widget.configure(state="disabled")
+                elif kind == "stats":
+                    total, groups, avg = payload
+                    self.stat_total.set(total)
+                    self.stat_groups.set(groups)
+                    self.stat_avg.set(avg)
+                elif kind == "done":
+                    ok, message = payload
+                    self.progress.stop()
+                    if ok:
+                        self.open_folder_btn.configure(state="normal")
+                        messagebox.showinfo("완료", message)
+                    else:
+                        messagebox.showerror("오류", message)
+        except queue.Empty:
+            pass
+        self.root.after(80, self._poll_queue)
+
+    # ---- 액션 ----
 
     def browse_source(self):
         path = filedialog.askdirectory(title="원본 사진 폴더 선택")
@@ -178,6 +296,10 @@ class App:
         path = filedialog.askdirectory(title="결과 저장 폴더 선택")
         if path:
             self.dest_var.set(path)
+
+    def open_result_folder(self):
+        if self._dest_root and self._dest_root.exists():
+            os.startfile(str(self._dest_root))
 
     def _validate_inputs(self):
         source = self.source_var.get().strip()
@@ -201,75 +323,70 @@ class App:
 
         return source_dir, Path(dest), num_folders
 
-    def _compute(self):
+    def _run_pipeline(self, do_copy: bool):
         result = self._validate_inputs()
         if result is None:
-            return None
+            return
         source_dir, dest_root, num_folders = result
+        method = self.method_var.get()
 
-        self.log("=" * 50)
-        self.log("스캔을 시작합니다...")
-        files = scan_images(source_dir, self.log)
-        self.log(f"총 {len(files)}장의 이미지를 최종적으로 사용합니다.")
+        self.progress.start(12)
 
-        if self.method_var.get() == "perceptual":
-            groups = group_perceptual(files, threshold=4, log_fn=self.log)
-        else:
-            groups = group_exact(files)
+        def worker():
+            try:
+                self.log("=" * 50)
+                self.log("스캔을 시작합니다...")
+                files = scan_images(source_dir, self.log)
+                self.log(f"총 {len(files)}장의 이미지를 최종적으로 사용합니다.")
 
-        self.log(f"{len(groups)}개의 서로 다른 사진 그룹으로 분류되었습니다.")
+                groups = (group_perceptual(files, 4, self.log) if method == "perceptual"
+                           else group_exact(files))
+                self.log(f"{len(groups)}개의 서로 다른 사진 그룹으로 분류되었습니다.")
 
-        plan, warnings, groups_sorted = assign_to_folders(groups, num_folders)
-        for w in warnings:
-            self.log(f"[경고] {w}")
+                plan, warnings, groups_sorted = assign_to_folders(groups, num_folders)
+                for w in warnings:
+                    self.log(f"[경고] {w}")
 
-        counts = [len(plan.get(i, [])) for i in range(num_folders)]
-        self.log(
-            f"폴더별 배치 예상: 최소 {min(counts)}장 / 최대 {max(counts)}장 / "
-            f"평균 {sum(counts) / num_folders:.1f}장"
-        )
-        preview_line = ", ".join(f"{i + 1}번:{c}장" for i, c in enumerate(counts[:10]))
-        self.log(f"앞 10개 폴더 예시 -> {preview_line} ...")
+                counts = [len(plan.get(i, [])) for i in range(num_folders)]
+                self.set_stats(len(files), len(groups), f"{sum(counts) / num_folders:.1f}")
 
-        self._plan = plan
-        self._groups_sorted = groups_sorted
-        self._num_folders = num_folders
-        self._dest_root = dest_root
-        return True
+                self._plan = plan
+                self._groups_sorted = groups_sorted
+                self._num_folders = num_folders
+                self._dest_root = dest_root
+
+                if not do_copy:
+                    self.log("미리보기 완료. 결과가 이상 없으면 '실행'을 눌러 실제로 복사하세요.")
+                    self.queue.put(("done", (True, "미리보기가 완료되었습니다. 로그를 확인하세요.")))
+                    return
+
+                dest_root.mkdir(parents=True, exist_ok=True)
+                report_path = dest_root / "그룹_검수_리포트.txt"
+                write_group_report(groups_sorted, report_path)
+                self.log(f"그룹 검수 리포트 저장: {report_path}")
+
+                self.log("실제 복사를 시작합니다...")
+                execute_plan(plan, dest_root, num_folders, self.log)
+                self.log("전체 작업 완료.")
+                self.queue.put(("done", (True, f"작업이 완료되었습니다.\n결과 폴더: {dest_root}")))
+            except Exception as e:
+                self.log(f"[오류] {e}")
+                self.queue.put(("done", (False, str(e))))
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def on_preview(self):
-        try:
-            self._compute()
-            self.log("미리보기 완료. 결과가 이상 없으면 '실행'을 눌러 실제로 복사하세요.")
-        except Exception as e:
-            self.log(f"[오류] {e}")
-            messagebox.showerror("오류", str(e))
+        self._run_pipeline(do_copy=False)
 
     def on_run(self):
-        try:
-            if self._compute() is None:
-                return
-            self._dest_root.mkdir(parents=True, exist_ok=True)
-            report_path = self._dest_root / "그룹_검수_리포트.txt"
-            write_group_report(self._groups_sorted, report_path)
-            self.log(f"그룹 검수 리포트 저장: {report_path}")
-
-            self.log("실제 복사를 시작합니다...")
-            execute_plan(self._plan, self._dest_root, self._num_folders, self.log)
-            self.log("전체 작업 완료.")
-            messagebox.showinfo("완료", f"작업이 완료되었습니다.\n결과 폴더: {self._dest_root}")
-        except Exception as e:
-            self.log(f"[오류] {e}")
-            messagebox.showerror("오류", str(e))
+        self._run_pipeline(do_copy=True)
 
 
 def main():
-    root = tk.Tk()
+    root = tb.Window(themename="flatly")
     App(root)
     root.mainloop()
 
 
 if __name__ == "__main__":
     main()
-# build trigger 1787812786
-# build trigger 1787812865
